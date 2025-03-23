@@ -1,7 +1,7 @@
 {
   "name": "warewolf-game",
   "version": "1.0.0",
-  "description": "A basic multiplayer warewolf game",
+  "description": "A multiplayer warewolf game with roles and phases based on classic rules",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -13,4 +13,3 @@
   "author": "Your Name",
   "license": "ISC"
 }
-
