@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin Panel - Warewolf Game</title>
+    <style>
+      body { font-family: Arial, sans-serif; }
+      button { margin: 5px; padding: 10px; }
+      #status { margin-top: 20px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Admin Panel</h1>
+    <button id="startGame">Start Game</button>
+    <button id="endNight">End Night</button>
+    <button id="endVoting">End Voting</button>
+    <div id="status"></div>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+       // Connect to the server as admin by including the admin key in the query
+       const socket = io({ query: { adminKey: 'your-secret-key' } });
+       
+       document.getElementById('startGame').addEventListener('click', function() {
+          socket.emit('admin command', { action: 'start' });
+       });
+       document.getElementById('endNight').addEventListener('click', function() {
+          socket.emit('admin command', { action: 'endNight' });
+       });
+       document.getElementById('endVoting').addEventListener('click', function() {
+          socket.emit('admin command', { action: 'endVoting' });
+       });
+       
+       socket.on('game message', function(msg) {
+          document.getElementById('status').textContent = msg;
+       });
+       socket.on('phase changed', function(data) {
+          document.getElementById('status').textContent = `Current phase: ${data.phase}`;
+       });
+       // For testing, log role assignments
+       socket.on('role assigned', function(data) {
+          console.log('Assigned role:', data.role);
+       });
+       // For seer results (if admin is also testing as a player)
+       socket.on('seer result', function(data) {
+          console.log('Seer result:', data);
+       });
+    </script>
+</body>
+</html>
