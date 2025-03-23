@@ -1,1 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Warewolf Game</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        #players { margin-bottom: 20px; }
+        #chat { border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: scroll; }
+        #messageForm { margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Welcome to the Warewolf Game</h1>
+    <div id="players">
+        <h3>Players:</h3>
+        <ul id="playerList"></ul>
+    </div>
+    <div id="chat">
+        <ul id="messages"></ul>
+    </div>
+    <form id="messageForm">
+        <input id="messageInput" autocomplete="off" placeholder="Type your message here..." /><button>Send</button>
+    </form>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+</body>
+</html>
 
