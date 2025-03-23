@@ -2,186 +2,264 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
+const fs = require('fs');
 
-const ADMIN_SECRET = "your-secret-key"; // Change this to your secret key
+const ADMIN_SECRET = "adminpass";  // Change as needed
+const ROOM_PASSCODE = "roompass";    // Change as needed
 const port = process.env.PORT || 3000;
 
 // Serve static files from the public folder
 app.use(express.static('public'));
 
-// Admin page route – requires secret key via query parameter (e.g. /admin?key=your-secret-key)
-app.get('/admin', (req, res) => {
+// Endpoint for admin to download logs (accessed via /downloadLogs?key=adminpass)
+app.get('/downloadLogs', (req, res) => {
     const key = req.query.key;
     if (key !== ADMIN_SECRET) {
         return res.status(403).send("Forbidden: Incorrect secret key.");
     }
-    res.sendFile(__dirname + '/public/admin.html');
+    const logs = { chatLogs, gameLogs };
+    res.setHeader('Content-disposition', 'attachment; filename=logs.json');
+    res.setHeader('Content-type', 'application/json');
+    res.send(JSON.stringify(logs, null, 2));
 });
 
-// Game state and player store
-let players = {}; // { socketId: { id, name, role, alive } }
+// Data structures
+let players = {};  // { socket.id: { id, nickname, studentId, role, alive, muted, activated, ... } }
 let gameState = {
-    phase: "waiting", // waiting, night, day, voting
-    werewolfVote: null,
-    seerVote: null,
-    medicVote: null,
-    votes: {} // { targetId: voteCount }
+    phase: "I",  // "I" (Immune-pathological) or "H" (Homeostasis)
+    votes: {}    // For H phase voting: { targetId: voteCount }
 };
+let chatLogs = []; // Array of { timestamp, sender, message, room }
+let gameLogs = []; // Array of { timestamp, event, details }
 
-// Utility function to broadcast current phase and player status to all clients
-function broadcastStatus() {
-    io.emit('phase changed', { phase: gameState.phase });
-    io.emit('players', Object.values(players));
+// Utility logging functions
+function logChat(sender, message, room = "global") {
+    const entry = { timestamp: new Date(), sender, message, room };
+    chatLogs.push(entry);
+    console.log("[Chat]", entry);
+}
+function logGame(event, details) {
+    const entry = { timestamp: new Date(), event, details };
+    gameLogs.push(entry);
+    console.log("[Game]", entry);
 }
 
-// Function to randomly assign roles to players
-function assignRoles() {
-    const playerIds = Object.keys(players);
-    const numPlayers = playerIds.length;
-    if (numPlayers < 4) {
-        io.emit('game message', "Not enough players to start the game. Minimum 4 required.");
+// Broadcast current game state to all clients
+function broadcastState() {
+    io.emit('game state', { phase: gameState.phase, players: Object.values(players) });
+}
+
+// Send a global game message (and log it)
+function sendGlobalMessage(message) {
+    io.emit('game message', message);
+    logGame("global message", message);
+}
+
+// Transition phase (admin-triggered)
+function transitionToPhase(phase) {
+    gameState.phase = phase;
+    gameState.votes = {};
+    broadcastState();
+    sendGlobalMessage(`Phase changed to ${phase} phase.`);
+}
+
+// Admin command: assign roles manually based on provided numbers
+// Expected data: { roles: { granulocyte: x, macrophage: y, pathogen: z, egc: w, host: u } }
+function assignRoles(rolesAssignment) {
+    let alivePlayers = Object.values(players).filter(p => p.alive);
+    alivePlayers.sort(() => Math.random() - 0.5);
+    let totalAssigned = 0;
+    for (let role in rolesAssignment) {
+        totalAssigned += rolesAssignment[role];
+    }
+    if (totalAssigned > alivePlayers.length) {
+        sendGlobalMessage("Not enough players for the given assignment.");
         return;
     }
-    // For simplicity, we assign one werewolf, one seer, one medic and the rest villagers.
-    let rolesArray = ["werewolf", "seer", "medic"];
-    while (rolesArray.length < numPlayers) {
-        rolesArray.push("villager");
+    let assignedCount = 0;
+    for (let role in rolesAssignment) {
+        let count = rolesAssignment[role];
+        for (let i = 0; i < count; i++) {
+            alivePlayers[assignedCount].role = role;
+            // For pathogens, add them to a private room
+            if (role === "pathogen") {
+                io.sockets.sockets.get(alivePlayers[assignedCount].id)?.join("pathogenRoom");
+            }
+            io.to(alivePlayers[assignedCount].id).emit('role assigned', { role });
+            logGame("role assigned", { player: alivePlayers[assignedCount].nickname, role });
+            assignedCount++;
+        }
     }
-    // Shuffle the roles randomly
-    rolesArray = rolesArray.sort(() => Math.random() - 0.5);
-    // Distribute roles and mark everyone as alive
-    playerIds.forEach((id, index) => {
-        players[id].role = rolesArray[index];
-        players[id].alive = true;
-        io.to(id).emit('role assigned', { role: rolesArray[index] });
-    });
-    io.emit('game message', "Roles have been assigned. Night falls...");
-    gameState.phase = "night";
-    broadcastStatus();
+    // Remaining players become "host" (default)
+    for (let i = assignedCount; i < alivePlayers.length; i++) {
+        alivePlayers[i].role = "host";
+        io.to(alivePlayers[i].id).emit('role assigned', { role: "host" });
+        logGame("role assigned", { player: alivePlayers[i].nickname, role: "host" });
+    }
+    broadcastState();
 }
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.id}`);
+    console.log("New connection:", socket.id);
 
-    // Check if this connection is from an admin (moderator)
+    // When a client joins, they must emit a "join" event with { passcode, nickname, studentId }
+    socket.on('join', (data) => {
+        if (data.passcode !== ROOM_PASSCODE) {
+            socket.emit('join error', "Incorrect room passcode.");
+            return;
+        }
+        players[socket.id] = {
+            id: socket.id,
+            nickname: data.nickname || `Player-${socket.id.substring(0,4)}`,
+            studentId: data.studentId || "",
+            role: null,
+            alive: true,
+            muted: false,
+            activated: false // For macrophage action
+        };
+        socket.join("global");
+        socket.emit('join success', { id: socket.id });
+        broadcastState();
+        logGame("player joined", { id: socket.id, nickname: players[socket.id].nickname });
+    });
+
+    // Mark admin connections (via query parameter)
     if (socket.handshake.query && socket.handshake.query.adminKey === ADMIN_SECRET) {
         socket.isAdmin = true;
-        console.log(`Admin connected: ${socket.id}`);
-    } else {
-        // Register as a player (set alive to true by default)
-        players[socket.id] = { id: socket.id, name: `Player-${socket.id.substring(0, 4)}`, alive: true };
-        broadcastStatus();
+        console.log("Admin connected:", socket.id);
     }
 
-    // Chat message handler for all clients
-    socket.on('chat message', (msg) => {
-        io.emit('chat message', { id: socket.id, msg });
+    // Chat message handling – data: { message, room }
+    socket.on('chat message', (data) => {
+        let room = data.room || "global";
+        // Global chat allowed only during H phase and for non-muted players
+        if (room === "global") {
+            if (gameState.phase !== "H") {
+                socket.emit('game message', "Global chat is only available during Homeostasis (H) phase.");
+                return;
+            }
+            if (players[socket.id] && players[socket.id].muted) {
+                socket.emit('game message', "You are muted this phase.");
+                return;
+            }
+        } else if (room === "pathogen") {
+            // Pathogen chat allowed only during I phase for players with role "pathogen"
+            if (!players[socket.id] || players[socket.id].role !== "pathogen" || gameState.phase !== "I") {
+                socket.emit('game message', "You are not permitted to chat in this room at this time.");
+                return;
+            }
+        }
+        logChat(players[socket.id]?.nickname || socket.id, data.message, room);
+        io.to(room).emit('chat message', { sender: players[socket.id]?.nickname, message: data.message, room });
     });
 
-    // ------------------ Night Phase Events ------------------
-    // Werewolf sends their vote (only one vote per night)
-    socket.on('werewolf vote', (data) => {
-        if (players[socket.id] && players[socket.id].role === 'werewolf' && gameState.phase === 'night' && players[socket.id].alive) {
-            gameState.werewolfVote = data.targetId;
-            socket.emit('game message', `Werewolf vote recorded for ${data.targetId}`);
+    // Granulocyte action during I phase: choose a target to inflame
+    socket.on('granulocyte action', (data) => {
+        if (!players[socket.id] || players[socket.id].role !== "granulocyte" || gameState.phase !== "I" || !players[socket.id].alive) {
+            socket.emit('game message', "Action not permitted.");
+            return;
+        }
+        players[socket.id].granAction = data.targetId;
+        logGame("granulocyte action", { granulocyte: players[socket.id].nickname, target: data.targetId });
+        // Apply effects based on target’s role
+        let target = players[data.targetId];
+        if (target) {
+            if (target.role === "macrophage") {
+                target.activated = true; // Macrophage can now act
+                io.to(target.id).emit('game message', "You have been inflamed and are now activated.");
+            }
+            if (target.role === "egc") {
+                target.noAlarm = true; // EGC cannot trigger alarm
+            }
+            if (target.role === "pathogen") {
+                // Block all pathogen kills this I phase
+                Object.values(players).forEach(p => {
+                    if (p.role === "pathogen") {
+                        p.pathBlocked = true;
+                    }
+                });
+            }
+            if (target.role === "host") {
+                target.muted = true; // Host cell muted during H phase
+            }
+        }
+        socket.emit('game message', `Granulocyte action recorded on target ${data.targetId}`);
+    });
+
+    // Macrophage action during I phase: inspect or kill (only if activated)
+    socket.on('macrophage action', (data) => {
+        // data: { action: "inspect" or "kill", targetId }
+        if (!players[socket.id] || players[socket.id].role !== "macrophage" || gameState.phase !== "I" || !players[socket.id].alive) {
+            socket.emit('game message', "Action not permitted.");
+            return;
+        }
+        if (!players[socket.id].activated) {
+            socket.emit('game message', "You were not inflamed and cannot act this phase.");
+            return;
+        }
+        players[socket.id].macAction = data.action;
+        players[socket.id].macTarget = data.targetId;
+        if (data.action === "inspect") {
+            let target = players[data.targetId];
+            if (target) {
+                let result = (target.role === "pathogen") ? "bad" : "good";
+                socket.emit('macrophage inspect result', { targetId: data.targetId, result });
+                logGame("macrophage inspect", { macrophage: players[socket.id].nickname, target: target.nickname, result });
+            }
+        } else if (data.action === "kill") {
+            logGame("macrophage kill action", { macrophage: players[socket.id].nickname, target: data.targetId });
+            socket.emit('game message', `Macrophage kill action recorded on target ${data.targetId}`);
         }
     });
 
-    // Seer sends their investigation choice
-    socket.on('seer vote', (data) => {
-        if (players[socket.id] && players[socket.id].role === 'seer' && gameState.phase === 'night' && players[socket.id].alive) {
-            gameState.seerVote = data.targetId;
-            // Immediately send result privately to the seer
-            const targetRole = players[data.targetId] ? players[data.targetId].role : "unknown";
-            const result = (targetRole === 'werewolf') ? "Yes, they are the werewolf." : "No, they are not the werewolf.";
-            socket.emit('seer result', { targetId: data.targetId, result });
+    // Pathogen vote during I phase: each pathogen votes for a target to kill
+    socket.on('pathogen vote', (data) => {
+        if (!players[socket.id] || players[socket.id].role !== "pathogen" || gameState.phase !== "I" || !players[socket.id].alive) {
+            socket.emit('game message', "Action not permitted.");
+            return;
         }
+        // Record pathogen vote (for simplicity, each pathogen’s vote is stored on their object)
+        players[socket.id].pathVote = data.targetId;
+        logGame("pathogen vote", { pathogen: players[socket.id].nickname, target: data.targetId });
+        socket.emit('game message', `Your vote recorded for target ${data.targetId}`);
     });
 
-    // Medic sends their save choice
-    socket.on('medic vote', (data) => {
-        if (players[socket.id] && players[socket.id].role === 'medic' && gameState.phase === 'night' && players[socket.id].alive) {
-            gameState.medicVote = data.targetId;
-            socket.emit('game message', `Medic vote recorded for ${data.targetId}`);
-        }
-    });
-
-    // ------------------ Daytime Voting Event ------------------
-    // During day phase, players can vote by clicking a player's name.
+    // Voting during H phase: all alive players can vote to eliminate a suspect
     socket.on('vote', (data) => {
-        if (players[socket.id] && players[socket.id].alive && gameState.phase === 'day') {
-            // Record vote: increase count for target
-            gameState.votes[data.targetId] = (gameState.votes[data.targetId] || 0) + 1;
-            io.emit('game message', `A vote was cast for ${data.targetId}`);
+        if (!players[socket.id] || !players[socket.id].alive || gameState.phase !== "H") {
+            socket.emit('game message', "You cannot vote at this time.");
+            return;
         }
+        gameState.votes[data.targetId] = (gameState.votes[data.targetId] || 0) + 1;
+        logGame("vote cast", { voter: players[socket.id].nickname, target: data.targetId });
+        io.emit('game message', `${players[socket.id].nickname} voted for ${data.targetId}`);
     });
 
-    // ------------------ Admin Commands ------------------
+    // Admin commands
     socket.on('admin command', (data) => {
         if (!socket.isAdmin) return;
-        if (data.action === 'start') {
-            assignRoles();
+        if (data.action === "assignRoles") {
+            // data.roles: { granulocyte, macrophage, pathogen, egc, host }
+            assignRoles(data.roles);
         }
-        // End Night: process the votes from werewolf, seer, medic
-        if (data.action === 'endNight' && gameState.phase === 'night') {
-            let victimId = gameState.werewolfVote;
-            if (!victimId) {
-                io.emit('game message', "No werewolf vote was cast. No victim tonight.");
-            } else {
-                if (gameState.medicVote === victimId) {
-                    io.emit('game message', "Medic saved the victim! No one dies tonight.");
-                } else {
-                    // Mark the victim as dead
-                    if (players[victimId]) {
-                        players[victimId].alive = false;
-                        io.emit('game message', `Player ${players[victimId].name} (${victimId.substring(0,4)}) died last night.`);
-                    }
-                }
-            }
-            // Reset night votes and move to day phase
-            gameState.werewolfVote = null;
-            gameState.seerVote = null;
-            gameState.medicVote = null;
-            gameState.votes = {};
-            gameState.phase = "day";
-            broadcastStatus();
-        }
-        // End Voting: tally votes and eliminate a player
-        if (data.action === 'endVoting' && gameState.phase === 'day') {
-            let maxVotes = 0, eliminated = null;
-            for (let targetId in gameState.votes) {
-                if (gameState.votes[targetId] > maxVotes) {
-                    maxVotes = gameState.votes[targetId];
-                    eliminated = targetId;
-                }
-            }
-            if (eliminated && players[eliminated] && players[eliminated].alive) {
-                players[eliminated].alive = false;
-                let roleRevealed = players[eliminated].role;
-                io.emit('game message', `Voting complete: ${players[eliminated].name} (${eliminated.substring(0,4)}) was eliminated. They were a ${roleRevealed}.`);
-            } else {
-                io.emit('game message', "Voting complete: No one was eliminated.");
-            }
-            // Reset votes and transition back to night phase if game continues
-            gameState.votes = {};
-            gameState.phase = "night";
-            io.emit('game message', "Night falls again...");
-            broadcastStatus();
+        if (data.action === "nextPhase") {
+            // data.phase should be "I" or "H"
+            transitionToPhase(data.phase);
         }
     });
 
-    // ------------------ Handle Disconnections ------------------
+    // Handle disconnects
     socket.on('disconnect', () => {
-        console.log(`User disconnected: ${socket.id}`);
-        if (!socket.isAdmin && players[socket.id]) {
+        if (players[socket.id]) {
+            logGame("player disconnected", { id: socket.id, nickname: players[socket.id].nickname });
             delete players[socket.id];
-            broadcastStatus();
+            broadcastState();
         }
     });
 });
 
-// Listen on all network interfaces
+// Start the server
 http.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
 });
