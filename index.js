@@ -35,7 +35,7 @@ io.on('connection', (socket) => {
     // Future game-specific events (e.g., role assignment, voting) can be added here.
 });
 
-http.listen(port, () => {
+http.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
 });
 
