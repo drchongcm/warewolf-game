@@ -1,1 +1,16 @@
+{
+  "name": "warewolf-game",
+  "version": "1.0.0",
+  "description": "A basic multiplayer warewolf game",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.6.1"
+  },
+  "author": "Your Name",
+  "license": "ISC"
+}
 
