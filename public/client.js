@@ -1,57 +1,174 @@
 const socket = io();
-let currentPhase = "waiting";
 
-// Update players list when the server sends updated data
-socket.on('players', function(players) {
-    const playerList = document.getElementById('playerList');
-    playerList.innerHTML = '';
-    players.forEach(player => {
-        let li = document.createElement('li');
-        li.textContent = player.name;
-        li.dataset.id = player.id;
-        // Mark dead players with a strike-through
-        if (!player.alive) {
-            li.classList.add('dead');
-        }
-        // Allow voting during day for alive players
-        li.addEventListener('click', function() {
-            if (currentPhase === 'day' && !player.dead && player.alive) {
-                socket.emit('vote', { targetId: player.id });
-                alert(`You voted for ${player.name}`);
-            }
-        });
-        playerList.appendChild(li);
-    });
+// DOM Elements
+const loginForm = document.getElementById("loginForm");
+const gameArea = document.getElementById("gameArea");
+const joinBtn = document.getElementById("joinBtn");
+const loginError = document.getElementById("loginError");
+const nicknameInput = document.getElementById("nickname");
+const studentIdInput = document.getElementById("studentId");
+const passcodeInput = document.getElementById("passcode");
+
+const chatMessages = document.getElementById("chatMessages");
+const chatInput = document.getElementById("chatInput");
+const sendChat = document.getElementById("sendChat");
+const playersUl = document.getElementById("playersUl");
+const phaseDisplay = document.getElementById("phaseDisplay");
+const actionArea = document.getElementById("actionArea");
+
+const phaseMusic = document.getElementById("phaseMusic");
+const volumeControl = document.getElementById("volumeControl");
+volumeControl.addEventListener("input", () => {
+    phaseMusic.volume = volumeControl.value;
 });
 
-// Handle chat message form submission
-const form = document.getElementById('messageForm');
-const input = document.getElementById('messageInput');
-const messages = document.getElementById('messages');
+// Attempt to play music (may require user interaction)
+phaseMusic.play();
 
-form.addEventListener('submit', function(e) {
-    e.preventDefault();
-    if (input.value) {
-        socket.emit('chat message', input.value);
-        input.value = '';
+let myId = null;
+let myRole = null;
+let currentPhase = null;
+
+// Join game on button click
+joinBtn.addEventListener("click", () => {
+    const nickname = nicknameInput.value.trim();
+    const studentId = studentIdInput.value.trim();
+    const passcode = passcodeInput.value.trim();
+    if (!nickname || !passcode) {
+        loginError.textContent = "Please enter nickname and room passcode.";
+        return;
+    }
+    socket.emit("join", { nickname, studentId, passcode });
+});
+
+socket.on("join success", (data) => {
+    myId = data.id;
+    loginForm.classList.add("hidden");
+    gameArea.classList.remove("hidden");
+});
+
+socket.on("join error", (msg) => {
+    loginError.textContent = msg;
+});
+
+// Send chat message
+sendChat.addEventListener("click", () => {
+    const message = chatInput.value.trim();
+    if (message) {
+        let room = "global";
+        // If in I phase and you are a pathogen, send to pathogen chat
+        if (currentPhase === "I" && myRole === "pathogen") {
+            room = "pathogen";
+        }
+        socket.emit("chat message", { message, room });
+        chatInput.value = "";
     }
 });
 
-// Listen for incoming chat messages and display them
-socket.on('chat message', function(data) {
-    const item = document.createElement('li');
-    item.textContent = `${data.id.substring(0, 4)}: ${data.msg}`;
-    messages.appendChild(item);
-    messages.scrollTop = messages.scrollHeight;
+socket.on("chat message", (data) => {
+    const li = document.createElement("li");
+    li.textContent = `[${data.room}] ${data.sender}: ${data.message}`;
+    chatMessages.appendChild(li);
 });
 
-// Listen for game messages and phase changes
-socket.on('game message', function(msg) {
-    const statusDiv = document.getElementById('gameStatus');
-    statusDiv.textContent = msg;
-});
-socket.on('phase changed', function(data) {
+// Update game state and player list
+socket.on("game state", (data) => {
     currentPhase = data.phase;
-    const statusDiv = document.getElementById('gameStatus');
-    statusDiv.textContent = `Current phase: ${currentPhase}`;
+    phaseDisplay.textContent = `Current Phase: ${data.phase}`;
+    playersUl.innerHTML = "";
+    data.players.forEach(player => {
+        const li = document.createElement("li");
+        li.textContent = player.nickname + (player.id === myId ? " (You)" : "");
+        if (!player.alive) {
+            li.style.textDecoration = "line-through";
+        }
+        playersUl.appendChild(li);
+    });
+    updateActionButtons();
 });
+
+// Display game messages
+socket.on("game message", (msg) => {
+    const li = document.createElement("li");
+    li.style.fontWeight = "bold";
+    li.textContent = `[Game]: ${msg}`;
+    chatMessages.appendChild(li);
+});
+
+// Receive role assignment
+socket.on("role assigned", (data) => {
+    myRole = data.role;
+    const li = document.createElement("li");
+    li.style.color = "blue";
+    li.textContent = `Your role is: ${data.role}`;
+    chatMessages.appendChild(li);
+    updateActionButtons();
+});
+
+// If macrophage inspects, receive result
+socket.on("macrophage inspect result", (data) => {
+    const li = document.createElement("li");
+    li.style.color = "green";
+    li.textContent = `Inspection of ${data.targetId}: ${data.result}`;
+    chatMessages.appendChild(li);
+});
+
+// Show role-specific action buttons based on phase and role
+function updateActionButtons() {
+    actionArea.innerHTML = "";
+    if (currentPhase === "I") {
+        if (myRole === "granulocyte") {
+            const btn = document.createElement("button");
+            btn.textContent = "Inflame (enter target ID)";
+            btn.addEventListener("click", () => {
+                const targetId = prompt("Enter target player's ID:");
+                if (targetId) {
+                    socket.emit("granulocyte action", { targetId });
+                }
+            });
+            actionArea.appendChild(btn);
+        }
+        if (myRole === "macrophage") {
+            const btnInspect = document.createElement("button");
+            btnInspect.textContent = "Inspect (enter target ID)";
+            btnInspect.addEventListener("click", () => {
+                const targetId = prompt("Enter target player's ID to inspect:");
+                if (targetId) {
+                    socket.emit("macrophage action", { action: "inspect", targetId });
+                }
+            });
+            const btnKill = document.createElement("button");
+            btnKill.textContent = "Kill (enter target ID)";
+            btnKill.addEventListener("click", () => {
+                const targetId = prompt("Enter target player's ID to kill:");
+                if (targetId) {
+                    socket.emit("macrophage action", { action: "kill", targetId });
+                }
+            });
+            actionArea.appendChild(btnInspect);
+            actionArea.appendChild(btnKill);
+        }
+        if (myRole === "pathogen") {
+            const btnPathVote = document.createElement("button");
+            btnPathVote.textContent = "Pathogen Vote (enter target ID)";
+            btnPathVote.addEventListener("click", () => {
+                const targetId = prompt("Enter target player's ID for pathogen vote:");
+                if (targetId) {
+                    socket.emit("pathogen vote", { targetId });
+                }
+            });
+            actionArea.appendChild(btnPathVote);
+        }
+    }
+    if (currentPhase === "H") {
+        const btnVote = document.createElement("button");
+        btnVote.textContent = "Vote to Eliminate (enter target ID)";
+        btnVote.addEventListener("click", () => {
+            const targetId = prompt("Enter target player's ID to vote for elimination:");
+            if (targetId) {
+                socket.emit("vote", { targetId });
+            }
+        });
+        actionArea.appendChild(btnVote);
+    }
+}
