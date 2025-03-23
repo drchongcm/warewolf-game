@@ -1,12 +1,25 @@
 const socket = io();
+let currentPhase = "waiting";
 
-// Update players list when server sends updated data
+// Update players list when the server sends updated data
 socket.on('players', function(players) {
     const playerList = document.getElementById('playerList');
     playerList.innerHTML = '';
     players.forEach(player => {
         let li = document.createElement('li');
         li.textContent = player.name;
+        li.dataset.id = player.id;
+        // Mark dead players with a strike-through
+        if (!player.alive) {
+            li.classList.add('dead');
+        }
+        // Allow voting during day for alive players
+        li.addEventListener('click', function() {
+            if (currentPhase === 'day' && !player.dead && player.alive) {
+                socket.emit('vote', { targetId: player.id });
+                alert(`You voted for ${player.name}`);
+            }
+        });
         playerList.appendChild(li);
     });
 });
@@ -27,9 +40,18 @@ form.addEventListener('submit', function(e) {
 // Listen for incoming chat messages and display them
 socket.on('chat message', function(data) {
     const item = document.createElement('li');
-    // Display the first 4 characters of the sender's ID as an identifier
     item.textContent = `${data.id.substring(0, 4)}: ${data.msg}`;
     messages.appendChild(item);
     messages.scrollTop = messages.scrollHeight;
 });
 
+// Listen for game messages and phase changes
+socket.on('game message', function(msg) {
+    const statusDiv = document.getElementById('gameStatus');
+    statusDiv.textContent = msg;
+});
+socket.on('phase changed', function(data) {
+    currentPhase = data.phase;
+    const statusDiv = document.getElementById('gameStatus');
+    statusDiv.textContent = `Current phase: ${currentPhase}`;
+});
