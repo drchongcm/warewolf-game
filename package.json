@@ -1,7 +1,7 @@
 {
-  "name": "warewolf-game",
+  "name": "immune-game",
   "version": "1.0.0",
-  "description": "A multiplayer warewolf game with roles and phases based on classic rules",
+  "description": "A custom multiplayer game with Immune-pathological (I) and Homeostasis (H) phases",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
